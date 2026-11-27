@@ -2,7 +2,7 @@ from app.models import AlertResponse, DeviceResponse, DeviceStatus
 
 
 class InMemoryDeviceRepository:
-    def __init__(self):
+    def __init__(self) -> None:
         self._devices: dict[str, DeviceResponse] = {}
         self._alerts: list[AlertResponse] = []
 
@@ -17,13 +17,19 @@ class InMemoryDeviceRepository:
         device = self._devices.get(device_id)
         return device.model_copy(deep=True) if device else None
 
-    def update_status(self, device_id: str, status: DeviceStatus) -> DeviceResponse:
-        device = self._devices[device_id].model_copy(update={"status": status})
-        self._devices[device_id] = device
-        return device.model_copy(deep=True)
+    def update_status(
+        self, device_id: str, status: DeviceStatus
+    ) -> DeviceResponse | None:
+        device = self._devices.get(device_id)
+        if device is None:
+            return None
+        updated = device.model_copy(update={"status": status}, deep=True)
+        self._devices[device_id] = updated
+        return updated.model_copy(deep=True)
 
-    def save_alert(self, alert: AlertResponse) -> None:
+    def save_alert(self, alert: AlertResponse) -> AlertResponse:
         self._alerts.append(alert.model_copy(deep=True))
+        return alert.model_copy(deep=True)
 
     def list_alerts(self) -> list[AlertResponse]:
         return [alert.model_copy(deep=True) for alert in self._alerts]

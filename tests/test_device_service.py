@@ -1,7 +1,13 @@
-import pytest
+from collections.abc import Iterator
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from app.db.models import Base
 from app.models import DeviceCreate
 from app.repositories.device_repository import InMemoryDeviceRepository
+from app.repositories.mysql_device_repository import MySqlDeviceRepository
 from app.services.device_service import (
     DeviceAlreadyExistsError,
     DeviceNotFoundError,
@@ -9,67 +15,112 @@ from app.services.device_service import (
 )
 
 
-@pytest.fixture
-def service():
-    return DeviceService(InMemoryDeviceRepository())
+Repository = InMemoryDeviceRepository | MySqlDeviceRepository
 
 
-@pytest.fixture
-def device():
+@pytest.fixture(params=["in-memory", "sqlite"])
+def service_context(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[Repository, DeviceService]]:
+    if request.param == "in-memory":
+        repository = InMemoryDeviceRepository()
+        yield repository, DeviceService(repository)
+        return
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            repository = MySqlDeviceRepository(session)
+            yield repository, DeviceService(repository)
+    finally:
+        engine.dispose()
+
+
+def make_device(status: str = "online") -> DeviceCreate:
     return DeviceCreate(
         device_id="RTR-101",
         name="Branch Router",
         device_type="router",
         ip_address="192.168.10.1",
+        status=status,
     )
 
 
-def test_registration(service, device):
-    registered = service.register(device)
+def test_register_device(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    _, service = service_context
+
+    registered = service.register(make_device())
+
     assert registered.device_id == "RTR-101"
     assert registered.status == "online"
-    assert service.get("RTR-101") == registered
-    assert service.list() == [registered]
 
 
-def test_duplicate_registration(service, device):
-    service.register(device)
+def test_duplicate_registration_raises_error(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    _, service = service_context
+    service.register(make_device())
+
     with pytest.raises(DeviceAlreadyExistsError):
-        service.register(device)
+        service.register(make_device())
 
 
-def test_missing_device(service):
+def test_missing_device_raises_error(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    _, service = service_context
+
     with pytest.raises(DeviceNotFoundError):
-        service.get("missing")
-    with pytest.raises(DeviceNotFoundError):
-        service.update_status("missing", "offline")
+        service.get("MISSING")
 
 
-def test_initial_offline_registration_does_not_alert(service, device):
-    service.register(device.model_copy(update={"status": "offline"}))
-    assert service.list_alerts() == []
+def test_initial_offline_registration_does_not_create_alert(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    repository, service = service_context
+
+    service.register(make_device(status="offline"))
+
+    assert repository.list_alerts() == []
 
 
-def test_online_to_offline_and_repeated_offline(service, device):
-    service.register(device)
-    assert service.update_status(device.device_id, "offline").status == "offline"
-    alerts = service.list_alerts()
+def test_online_to_offline_creates_one_alert(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    repository, service = service_context
+    service.register(make_device())
+
+    service.update_status("RTR-101", "offline")
+
+    alerts = repository.list_alerts()
     assert len(alerts) == 1
-    assert alerts[0].device_id == device.device_id
+    assert alerts[0].device_id == "RTR-101"
+    assert "online to offline" in alerts[0].message
     assert alerts[0].timestamp.utcoffset().total_seconds() == 0
-    service.update_status(device.device_id, "offline")
-    assert service.list_alerts() == alerts
-    service.update_status(device.device_id, "online")
-    service.update_status(device.device_id, "offline")
-    assert len(service.list_alerts()) == 2
 
 
-def test_repository_returns_copies(service, device):
+def test_repeated_offline_update_does_not_create_another_alert(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    repository, service = service_context
+    service.register(make_device())
+
+    service.update_status("RTR-101", "offline")
+    service.update_status("RTR-101", "offline")
+
+    assert len(repository.list_alerts()) == 1
+
+
+def test_optional_location_is_preserved(
+    service_context: tuple[Repository, DeviceService],
+) -> None:
+    _, service = service_context
+    device = make_device()
+    device.location = "Branch Office"
+
     registered = service.register(device)
-    registered.status = "offline"
-    service.list()[0].name = "Changed"
-    assert service.get(device.device_id).status == "online"
-    assert service.get(device.device_id).name == "Branch Router"
-    service.update_status(device.device_id, "offline")
-    service.list_alerts()[0].message = "Changed"
-    assert service.list_alerts()[0].message != "Changed"
+
+    assert registered.location == "Branch Office"

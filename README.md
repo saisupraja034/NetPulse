@@ -1,40 +1,68 @@
 # NetPulse
 
-NetPulse is a small, single-process FastAPI device-monitoring exercise. It does not ping devices or persist data; devices and alerts are cleared when the server restarts.
+A small modular FastAPI network-device monitoring API. Device and alert state is
+stored in MySQL and persists across application restarts. The API does not
+contact or probe real devices.
 
-## Setup and start
+## Run
 
-From the project root on Linux or macOS:
+Create and activate a virtual environment, then install dependencies:
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-On Windows, activate with `.venv\Scripts\activate` instead. Select the `.venv` Python interpreter in VS Code. Open http://127.0.0.1:8000/docs for Swagger UI or http://127.0.0.1:8000/openapi.json for the generated API schema.
+Configure `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in the
+ignored `.env` file. `DATABASE_URL` can optionally provide the complete
+`mysql+pymysql` connection URL. Create or select the target database, then apply
+the schema with `alembic upgrade head` before starting the API.
 
-## Swagger walkthrough
+Open `http://127.0.0.1:8000/docs` for the six endpoints. FastAPI builds
+`/openapi.json` from the route declarations, request/response models, examples,
+and documented error responses.
 
-Start with a freshly restarted server. In `POST /devices`, select **Try it out**, submit the following, and expect HTTP 201:
+The API provides `POST /devices` (201), `GET /devices`,
+`GET /devices/{device_id}`, `PATCH /devices/{device_id}/status`, `GET /alerts`,
+and `GET /health` (`{"status":"ok"}`). Duplicate IDs return 409 and unknown
+device IDs return 404.
+
+## Swagger Walkthrough
+
+In `POST /devices`, register this device and expect HTTP 201:
 
 ```json
 {
-  "device_id": "RTR-101",
-  "name": "Branch Router",
-  "device_type": "router",
-  "ip_address": "192.168.10.1",
-  "status": "online"
+	"device_id": "RTR-101",
+	"name": "Branch Router",
+	"device_type": "router",
+	"ip_address": "192.168.10.1",
+	"status": "online"
 }
 ```
 
-In `PATCH /devices/{device_id}/status`, enter `RTR-101` and submit `{"status":"offline"}`. Expect HTTP 200 and an offline device. Run `GET /alerts` to see one alert. Repeat the PATCH and GET: there is still one alert. Registering `RTR-101` again returns HTTP 409. If the ID already exists, restart the server or use `RTR-102`.
+In `PATCH /devices/{device_id}/status`, set `device_id` to `RTR-101` and send
+`{"status":"offline"}`. Expect HTTP 200 and an offline response. Run
+`GET /alerts`: it should contain one alert for `RTR-101`. Repeat the PATCH and
+GET; the alert count remains one. Re-registering `RTR-101` returns HTTP 409.
+Restart the server for a clean run because in-memory data resets on restart.
 
-## Tests and architecture
+## Architecture
 
-Run `python -m pytest -q` from the project root with the environment activated. Each service test creates its own repository.
+- Routes validate HTTP requests and translate service exceptions into HTTP errors.
+- The service owns registration, lookup, and online-to-offline transition rules.
+- The repository owns in-memory dictionaries/lists and returns copies of stored data.
+- The event function creates and stores an alert through the repository interface.
 
-Routes validate requests, return responses, and translate service errors into HTTP status codes. The service owns registration and transition rules. The repository owns the in-memory devices and alerts, returning copies to callers. The event function creates and saves an offline alert. These layers ship as one deployable application, a modular monolith, not separate services.
+The repository is passed into `DeviceService`, so the MySQL-backed repository
+can replace the in-memory implementation without moving business rules into the
+storage layer. NetPulse remains one deployable modular monolith: all layers run
+in one application process and are packaged as one service.
 
-A future database repository can implement the same repository methods and be injected into `DeviceService`; its business rules need not change. FastAPI generates `/openapi.json` from route declarations, response codes, and Pydantic models, and Swagger UI uses that schema to display the API.
+## Tests
+
+```bash
+python -m pytest -q
+```
